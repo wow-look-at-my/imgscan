@@ -2,6 +2,8 @@ package main
 
 import (
 	"archive/tar"
+	"bufio"
+	"bytes"
 	"compress/flate"
 	"compress/gzip"
 	"crypto/sha256"
@@ -10,6 +12,8 @@ import (
 	"io"
 	"path"
 	"strings"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 // Entry is one tar member of one layer. Kind is f (file), l (symlink), h (hardlink), w (whiteout), o (opaque dir).
@@ -30,13 +34,33 @@ func (c *countWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// scanLayer reads one gzip layer and returns its entries with content hashes and per-file gzip sizes.
-func scanLayer(r io.Reader, layer int) ([]Entry, error) {
-	gz, err := gzip.NewReader(r)
-	if err != nil {
-		return nil, fmt.Errorf("layer %d: gzip: %w", layer, err)
+var zstdMagic = []byte{0x28, 0xb5, 0x2f, 0xfd}
+
+// decompress picks gzip or zstd from the stream's magic bytes, so a mislabeled media type cannot mislead it.
+func decompress(r io.Reader, layer int) (io.Reader, error) {
+	br := bufio.NewReader(r)
+	head, err := br.Peek(len(zstdMagic))
+	if err == nil && bytes.Equal(head, zstdMagic) {
+		zr, err := zstd.NewReader(br, zstd.WithDecoderConcurrency(1))
+		if err != nil {
+			return nil, fmt.Errorf("layer %d: zstd: %w", layer, err)
+		}
+		return zr.IOReadCloser(), nil
 	}
-	tr := tar.NewReader(gz)
+	gz, err := gzip.NewReader(br)
+	if err != nil {
+		return nil, fmt.Errorf("layer %d: neither zstd nor gzip: %w", layer, err)
+	}
+	return gz, nil
+}
+
+// scanLayer reads one gzip or zstd layer and returns its entries with content hashes and per-file gzip sizes.
+func scanLayer(r io.Reader, layer int) ([]Entry, error) {
+	plain, err := decompress(r, layer)
+	if err != nil {
+		return nil, err
+	}
+	tr := tar.NewReader(plain)
 	var out []Entry
 	for {
 		h, err := tr.Next()

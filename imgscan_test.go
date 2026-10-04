@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -72,6 +74,23 @@ func TestScanLayerKinds(t *testing.T) {
 	assert.Equal(t, Entry{Layer: 3, Kind: 'h', Path: "usr/h", Link: "usr/a"}, es[2])
 	assert.Equal(t, Entry{Layer: 3, Kind: 'w', Path: "usr/gone"}, es[3])
 	assert.Equal(t, Entry{Layer: 3, Kind: 'o', Path: "opt"}, es[4])
+}
+
+func TestScanLayerZstd(t *testing.T) {
+	ms := []member{{name: "usr/a", body: "hello"}, {name: "usr/l", link: "a", kind: 'l'}}
+	gzLayer := layerBytes(t, ms...)
+	gz, err := gzip.NewReader(bytes.NewReader(gzLayer))
+	require.NoError(t, err)
+	var zbuf bytes.Buffer
+	zw, err := zstd.NewWriter(&zbuf)
+	require.NoError(t, err)
+	_, err = io.Copy(zw, gz)
+	require.NoError(t, err)
+	require.NoError(t, zw.Close())
+
+	fromZstd, err := scanLayer(&zbuf, 2)
+	require.NoError(t, err)
+	assert.Equal(t, scan(t, 2, ms...), fromZstd)
 }
 
 func TestScanLayerErrors(t *testing.T) {
