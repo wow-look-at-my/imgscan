@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"github.com/wow-look-at-my/go-containers/set"
 	"io"
 	"path"
 	"regexp"
@@ -59,8 +60,6 @@ func hidden(p string, layer int, wh, op map[string]int) bool {
 
 // Bytes is an uncompressed size and a per-file gzip size.
 type Bytes struct{ Raw, Gz int64 }
-
-func (b *Bytes) add(e Entry) { b.Raw += e.Size; b.Gz += e.Gz }
 
 func mb(n int64) int64 { return n >> 20 }
 
@@ -247,15 +246,15 @@ func report(w io.Writer, es []Entry, o Options) {
 		o.Rules = defaultRules
 	}
 	view := finalView(es)
-	live := map[key]bool{}
+	live := set.New[key]()
 	for _, e := range view {
-		live[key{e.Layer, e.Path}] = true
+		live.Add(key{e.Layer, e.Path})
 	}
 	dropped := func(p string) bool { return classify(o.Drop, p) != "" }
 
 	dead := map[string]*Bytes{}
 	for _, e := range es {
-		if e.Kind != 'f' || live[key{e.Layer, e.Path}] {
+		if e.Kind != 'f' || live.Contains(key{e.Layer, e.Path}) {
 			continue
 		}
 		k := "shadowed or deleted by a later layer: " + label(o.Labels, e.Layer)
