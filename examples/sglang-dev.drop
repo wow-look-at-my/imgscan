@@ -1,0 +1,5 @@
+# Files the sglang dev-image cleanup deletes (wow-look-at-my/sglang#38), for --drop.
+CUDA static archives	^usr/local/cuda-[0-9.]+/.*_static[^/]*\.a$|^usr/lib/[^/]+/libnccl_static\.a$
+Nsight Compute GUI	^opt/nvidia/nsight-compute/[^/]+/host/linux-desktop-
+system cuDNN	^usr/(lib|include)/[^/]+/(lib)?cudnn|^usr/share/doc/libcudnn|^var/lib/dpkg/info/libcudnn
+flashinfer cubins no GPU in 80;120a runs	site-packages/flashinfer_cubin/cubins/.*[Ss]m1[0-9][0-9][af]
