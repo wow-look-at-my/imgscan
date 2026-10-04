@@ -1,6 +1,8 @@
 github.com/cpuguy83/go-md2man/v2 v2.0.6/go.mod git:441631534462b74c098953dbd8d5f6210994b0bf
 github.com/inconshreveable/mousetrap v1.1.0 git:4e8053ee7ef85a6bd26368364a6d27f1641c1d21
 github.com/inconshreveable/mousetrap v1.1.0/go.mod git:4e8053ee7ef85a6bd26368364a6d27f1641c1d21
+github.com/klauspost/compress v1.20.1 git:5d880f230c38a0fc806b9ca1613103a44feff0ac
+github.com/klauspost/compress v1.20.1/go.mod git:5d880f230c38a0fc806b9ca1613103a44feff0ac
 github.com/russross/blackfriday/v2 v2.1.0/go.mod git:4c9bf9512682b995722660a4196c0013228e2049
 github.com/spf13/cobra v1.10.2 git:88b30ab89da2d0d0abb153818746c5a2d30eccec
 github.com/spf13/cobra v1.10.2/go.mod git:88b30ab89da2d0d0abb153818746c5a2d30eccec
