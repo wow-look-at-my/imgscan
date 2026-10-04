@@ -153,6 +153,8 @@ func TestReport(t *testing.T) {
 		member{name: "opt/venv/lib/python3.12/site-packages/junk/y", body: "junk"},
 		member{name: "p/__pycache__/m.pyc", body: "pyc"},
 		member{name: "gone", body: "dead"},
+		member{name: "lib/one.so", body: "twin"},
+		member{name: "lib/two.so", body: "twin"},
 	), scan(t, 1,
 		member{name: "p/.wh.__pycache__"},
 		member{name: ".wh.gone"},
@@ -160,7 +162,7 @@ func TestReport(t *testing.T) {
 	)...)
 	drop := mustRules("junk\tsite-packages/junk/\n")
 	var buf bytes.Buffer
-	report(&buf, es, Options{Drop: drop, Labels: []string{"RUN base", "RUN cleanup"}, Top: 1})
+	report(&buf, es, Options{Drop: drop, Labels: []string{"RUN base", "RUN cleanup"}, Top: 5})
 	out := buf.String()
 	assert.Contains(t, out, ".pyc deleted by a later layer")
 	assert.Contains(t, out, "layer 0 RUN base")
@@ -171,8 +173,11 @@ func TestReport(t *testing.T) {
 	assert.Contains(t, out, "python packages")
 	assert.Contains(t, out, "torch")
 	assert.NotContains(t, strings.SplitN(out, "Remaining python packages", 2)[1], "junk")
-	assert.Contains(t, out, "more rows in the total")
 	assert.Equal(t, "layer 9", label(nil, 9))
+
+	buf.Reset()
+	report(&buf, es, Options{Top: 1})
+	assert.Contains(t, buf.String(), "more rows in the total")
 }
 
 func TestSplitRef(t *testing.T) {

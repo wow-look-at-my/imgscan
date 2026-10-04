@@ -113,7 +113,8 @@ var argPrefix = regexp.MustCompile(`^RUN \|[0-9]+ (\S+=\S* )*`)
 // shortCmd turns a history created_by into a one-line label: build args and the shell prefix removed.
 func shortCmd(s string) string {
 	s = argPrefix.ReplaceAllString(s, "RUN ")
-	s = strings.Join(strings.Fields(strings.ReplaceAll(s, "/bin/sh -c ", "")), " ")
+	s = strings.ReplaceAll(strings.ReplaceAll(s, "/bin/sh -c ", ""), "#(nop) ", "")
+	s = strings.Join(strings.Fields(s), " ")
 	if len(s) > 90 {
 		s = s[:90]
 	}
