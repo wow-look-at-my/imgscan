@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -38,10 +39,14 @@ func TestRepackGroupingBeatsPathOrder(t *testing.T) {
 	assert.Less(t, best.Linked, s.Linked, "zstd with a large window beats gzip on the same order")
 }
 
+// longName fits a USTAR name (prefix plus name) but not a USTAR link name.
+var longName = "opt/" + strings.Repeat("d", 120) + "/x.so"
+
 // The rewritten tar must extract to the same files: every hardlink after the file it names, every body kept.
 func TestRepackWritesAValidTar(t *testing.T) {
 	gzLayer := layerBytes(t,
 		member{name: "z/", kind: 'd'},
+		member{name: longName, body: elfLike(1)},
 		member{name: "z/b.so", body: elfLike(1)},
 		member{name: "a/x.txt", body: "text"},
 		member{name: "z/a.so", body: elfLike(1)},
@@ -81,7 +86,8 @@ func TestRepackWritesAValidTar(t *testing.T) {
 		}
 	}
 	sort.Strings(names)
-	assert.Equal(t, []string{"a/.wh.gone", "a/hard", "a/link", "a/x.txt", "z/", "z/a.so", "z/b.so"}, names)
+	assert.Equal(t, []string{"a/.wh.gone", "a/hard", "a/link", "a/x.txt", longName, "z/", "z/a.so", "z/b.so"}, names)
+	assert.Equal(t, bodies[longName], bodies["z/b.so"])
 	assert.Equal(t, bodies["z/b.so"], bodies["z/a.so"])
 	assert.Equal(t, bodies["z/b.so"], bodies["a/hard"])
 	assert.Equal(t, sha256.Sum256([]byte("text")), bodies["a/x.txt"])
