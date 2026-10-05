@@ -14,7 +14,7 @@ import (
 )
 
 func elfLike(seed byte) string {
-	return "\x7fELF" + noise(40<<10, 9) + noise(8<<10, seed)
+	return "\x7fELF" + noise(8<<10, 9) + noise(2<<10, seed)
 }
 
 func TestRepackGroupingBeatsPathOrder(t *testing.T) {
