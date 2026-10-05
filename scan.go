@@ -37,8 +37,9 @@ const (
 
 // ScanOptions picks how a layer's tar stream is compressed again.
 type ScanOptions struct {
-	Codec Codec
-	Level int
+	Codec  Codec
+	Level  int
+	Window int
 }
 
 // LayerStat is the compressed size of one layer's whole tar stream.
@@ -86,13 +87,16 @@ type meter struct {
 	last  int64
 }
 
-func newMeter(c Codec, level int) (*meter, error) {
+func newMeter(c Codec, level, window int) (*meter, error) {
 	m := &meter{}
 	switch c {
 	case Zstd:
 		opts := []zstd.EOption{zstd.WithEncoderConcurrency(1)}
 		if level != 0 {
 			opts = append(opts, zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(level)))
+		}
+		if window != 0 {
+			opts = append(opts, zstd.WithWindowSize(window))
 		}
 		zw, err := zstd.NewWriter(&m.out, opts...)
 		if err != nil {
@@ -145,7 +149,7 @@ func scanLayer(r io.Reader, layer int, o ScanOptions) ([]Entry, LayerStat, error
 	if o.Codec != "" {
 		codec = o.Codec
 	}
-	m, err := newMeter(codec, o.Level)
+	m, err := newMeter(codec, o.Level, o.Window)
 	if err != nil {
 		return nil, LayerStat{}, err
 	}

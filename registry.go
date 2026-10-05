@@ -121,6 +121,21 @@ func shortCmd(s string) string {
 	return s
 }
 
+// openImage gets an anonymous token for repo and resolves ref to its arch manifest and layer labels.
+func openImage(registry, tokenURL, repo, ref, arch string) (*Registry, manifest, []string, error) {
+	if tokenURL == "" {
+		tokenURL = fmt.Sprintf("%s/token?scope=repository:%s:pull", registry, repo)
+	}
+	client := &http.Client{}
+	tok, err := anonToken(client, tokenURL)
+	if err != nil {
+		return nil, manifest{}, nil, err
+	}
+	reg := &Registry{Base: registry, Repo: repo, Token: tok, HTTP: client}
+	m, labels, err := reg.Image(ref, arch)
+	return reg, m, labels, err
+}
+
 // anonToken asks a registry token endpoint (the ghcr.io and Docker Hub form) for an anonymous pull token.
 func anonToken(client *http.Client, url string) (string, error) {
 	resp, err := client.Get(url)
