@@ -58,8 +58,8 @@ func hidden(p string, layer int, wh, op map[string]int) bool {
 	}
 }
 
-// Bytes is an uncompressed size and a per-file gzip size.
-type Bytes struct{ Raw, Gz int64 }
+// Bytes is an uncompressed size and a share of the compressed layer streams.
+type Bytes struct{ Raw, Packed int64 }
 
 func mb(n int64) int64 { return n >> 20 }
 
@@ -67,14 +67,14 @@ func mb(n int64) int64 { return n >> 20 }
 type DupGroup struct {
 	Hash   string
 	Size   int64
-	Gz     int64
+	Packed     int64
 	Paths  []string
 	Layers []int
 }
 
 func (g DupGroup) reclaim() Bytes {
 	n := int64(len(g.Paths) - 1)
-	return Bytes{Raw: n * g.Size, Gz: n * g.Gz}
+	return Bytes{Raw: n * g.Size, Packed: n * g.Packed}
 }
 
 func (g DupGroup) sameLayer() bool {
@@ -94,7 +94,7 @@ func dupGroups(view map[string]Entry) []DupGroup {
 		}
 		g := groups[e.Hash]
 		if g == nil {
-			g = &DupGroup{Hash: e.Hash, Size: e.Size, Gz: e.Gz}
+			g = &DupGroup{Hash: e.Hash, Size: e.Size, Packed: e.Packed}
 			groups[e.Hash] = g
 		}
 		g.Paths = append(g.Paths, e.Path)
@@ -198,8 +198,8 @@ func sortedRows(m map[string]*Bytes) []row {
 		out = append(out, row{k, *v})
 	}
 	sort.Slice(out, func(i, j int) bool {
-		if out[i].b.Gz != out[j].b.Gz {
-			return out[i].b.Gz > out[j].b.Gz
+		if out[i].b.Packed != out[j].b.Packed {
+			return out[i].b.Packed > out[j].b.Packed
 		}
 		return out[i].name < out[j].name
 	})
@@ -211,25 +211,25 @@ func bump(m map[string]*Bytes, k string, b Bytes) {
 		m[k] = &Bytes{}
 	}
 	m[k].Raw += b.Raw
-	m[k].Gz += b.Gz
+	m[k].Packed += b.Packed
 }
 
-func entryBytes(e Entry) Bytes { return Bytes{e.Size, e.Gz} }
+func entryBytes(e Entry) Bytes { return Bytes{e.Size, e.Packed} }
 
 func printRows(w io.Writer, title string, rows []row, limit int) {
 	var t Bytes
-	fmt.Fprintf(w, "\n## %s\n%8s %8s  %s\n", title, "gz MB", "raw MB", "what")
+	fmt.Fprintf(w, "\n## %s\n%8s %8s  %s\n", title, "pack MB", "raw MB", "what")
 	for i, r := range rows {
 		if limit == 0 || i < limit {
-			fmt.Fprintf(w, "%8d %8d  %s\n", mb(r.b.Gz), mb(r.b.Raw), r.name)
+			fmt.Fprintf(w, "%8d %8d  %s\n", mb(r.b.Packed), mb(r.b.Raw), r.name)
 		}
 		t.Raw += r.b.Raw
-		t.Gz += r.b.Gz
+		t.Packed += r.b.Packed
 	}
 	if limit > 0 && len(rows) > limit {
 		fmt.Fprintf(w, "%8s %8s  (%d more rows in the total)\n", "", "", len(rows)-limit)
 	}
-	fmt.Fprintf(w, "%8d %8d  TOTAL\n", mb(t.Gz), mb(t.Raw))
+	fmt.Fprintf(w, "%8d %8d  TOTAL\n", mb(t.Packed), mb(t.Raw))
 }
 
 // Options picks how report groups files. Drop lists files a planned change deletes, kept out of every other table.
@@ -310,6 +310,30 @@ func report(w io.Writer, es []Entry, o Options) {
 	if len(pkgs) > 0 {
 		printRows(w, "Remaining python packages", sortedRows(pkgs), o.Top)
 	}
+}
+
+// reportLayers compares each layer's tar stream compressed again with the blob the registry holds.
+// Both sizes match only when the codec and level match the ones the image was pushed with.
+func reportLayers(w io.Writer, layers []descriptor, stats []LayerStat, labels []string) {
+	fmt.Fprintf(w, "\n## Layers: the tar stream compressed again vs the registry blob\n%8s %8s %7s  %s\n", "pack MB", "blob MB", "diff", "layer")
+	var pack, blob int64
+	for i, d := range layers {
+		if i >= len(stats) {
+			break
+		}
+		s := stats[i]
+		pack += s.Packed
+		blob += d.Size
+		fmt.Fprintf(w, "%8d %8d %7s  %s (%s level %d)\n", mb(s.Packed), mb(d.Size), pct(s.Packed, d.Size), label(labels, i), s.Codec, s.Level)
+	}
+	fmt.Fprintf(w, "%8d %8d %7s  TOTAL\n", mb(pack), mb(blob), pct(pack, blob))
+}
+
+func pct(a, b int64) string {
+	if b == 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%+.1f%%", 100*float64(a-b)/float64(b))
 }
 
 func label(labels []string, l int) string {

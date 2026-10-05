@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -53,9 +54,33 @@ func layerBytes(t *testing.T, ms ...member) []byte {
 
 func scan(t *testing.T, layer int, ms ...member) []Entry {
 	t.Helper()
-	es, err := scanLayer(bytes.NewReader(layerBytes(t, ms...)), layer)
+	es, _, err := scanLayer(bytes.NewReader(layerBytes(t, ms...)), layer, ScanOptions{})
 	require.NoError(t, err)
 	return es
+}
+
+// zstdLayer recompresses a gzip layer as zstd, the way a zstd image stores the same tar.
+func zstdLayer(t *testing.T, gzLayer []byte) []byte {
+	t.Helper()
+	gz, err := gzip.NewReader(bytes.NewReader(gzLayer))
+	require.NoError(t, err)
+	var zbuf bytes.Buffer
+	zw, err := zstd.NewWriter(&zbuf)
+	require.NoError(t, err)
+	_, err = io.Copy(zw, gz)
+	require.NoError(t, err)
+	require.NoError(t, zw.Close())
+	return zbuf.Bytes()
+}
+
+func noise(n int, seed byte) string {
+	b := make([]byte, n)
+	x := uint32(seed) + 1
+	for i := range b {
+		x = x*1664525 + 1013904223
+		b[i] = byte(x >> 24)
+	}
+	return string(b)
 }
 
 func TestScanLayerKinds(t *testing.T) {
@@ -68,53 +93,102 @@ func TestScanLayerKinds(t *testing.T) {
 		member{name: "opt/.wh..wh..opq"},
 	)
 	require.Len(t, es, 5)
-	assert.Equal(t, Entry{Layer: 3, Kind: 'f', Path: "usr/a", Size: 5, Gz: es[0].Gz, Hash: es[0].Hash}, es[0])
-	assert.Positive(t, es[0].Gz)
-	assert.Equal(t, Entry{Layer: 3, Kind: 'l', Path: "usr/l", Link: "a"}, es[1])
-	assert.Equal(t, Entry{Layer: 3, Kind: 'h', Path: "usr/h", Link: "usr/a"}, es[2])
-	assert.Equal(t, Entry{Layer: 3, Kind: 'w', Path: "usr/gone"}, es[3])
-	assert.Equal(t, Entry{Layer: 3, Kind: 'o', Path: "opt"}, es[4])
+	want := []Entry{
+		{Layer: 3, Kind: 'f', Path: "usr/a", Size: 5, Hash: es[0].Hash},
+		{Layer: 3, Kind: 'l', Path: "usr/l", Link: "a"},
+		{Layer: 3, Kind: 'h', Path: "usr/h", Link: "usr/a"},
+		{Layer: 3, Kind: 'w', Path: "usr/gone"},
+		{Layer: 3, Kind: 'o', Path: "opt"},
+	}
+	for i := range want {
+		assert.Positive(t, es[i].Packed, "every member's header lands in the stream")
+		want[i].Packed = es[i].Packed
+	}
+	assert.Equal(t, want, es)
 }
 
 func TestScanLayerZstd(t *testing.T) {
 	ms := []member{{name: "usr/a", body: "hello"}, {name: "usr/l", link: "a", kind: 'l'}}
 	gzLayer := layerBytes(t, ms...)
-	gz, err := gzip.NewReader(bytes.NewReader(gzLayer))
+	fromZstd, st, err := scanLayer(bytes.NewReader(zstdLayer(t, gzLayer)), 2, ScanOptions{})
 	require.NoError(t, err)
-	var zbuf bytes.Buffer
-	zw, err := zstd.NewWriter(&zbuf)
+	assert.Equal(t, Zstd, st.Codec, "an empty codec measures with the blob's own codec")
+	fromGzip, _, err := scanLayer(bytes.NewReader(gzLayer), 2, ScanOptions{Codec: Zstd})
 	require.NoError(t, err)
-	_, err = io.Copy(zw, gz)
-	require.NoError(t, err)
-	require.NoError(t, zw.Close())
+	assert.Equal(t, fromGzip, fromZstd, "the same tar measures the same whatever the blob codec")
+}
 
-	fromZstd, err := scanLayer(&zbuf, 2)
+// A file that repeats bytes earlier in its layer costs almost nothing in a real blob. Per-file compression charged it in full.
+func TestScanLayerStreamCreditsRepeats(t *testing.T) {
+	body := noise(256<<10, 1)
+	for _, c := range []Codec{Zstd, Gzip} {
+		gzLayer := layerBytes(t, member{name: "a", body: body}, member{name: "b", body: body}, member{name: "c", body: noise(256<<10, 2)})
+		es, st, err := scanLayer(bytes.NewReader(gzLayer), 0, ScanOptions{Codec: c})
+		require.NoError(t, err)
+		require.Len(t, es, 3)
+		assert.Greater(t, es[0].Packed, int64(250<<10), c)
+		assert.Greater(t, es[2].Packed, int64(250<<10), c)
+		if c == Zstd {
+			assert.Less(t, es[1].Packed, int64(4<<10), "zstd's window reaches the first copy")
+		} else {
+			assert.Greater(t, es[1].Packed, int64(250<<10), "gzip's 32 KB window cannot reach the first copy")
+		}
+		var sum int64
+		for _, e := range es {
+			sum += e.Packed
+		}
+		assert.Equal(t, st.Packed, sum+st.Overhead, "every compressed byte belongs to an entry or to the overhead")
+	}
+}
+
+// With the blob's codec and level, the measured stream lands near the blob itself. The flushes at member boundaries are the only extra.
+func TestScanLayerMatchesBlob(t *testing.T) {
+	var ms []member
+	for i := range 50 {
+		ms = append(ms, member{name: fmt.Sprintf("lib/%d.so", i), body: noise(8<<10, byte(i%5)) + strings.Repeat("x", 4<<10)})
+	}
+	gzLayer := layerBytes(t, ms...)
+	_, st, err := scanLayer(bytes.NewReader(gzLayer), 0, ScanOptions{})
 	require.NoError(t, err)
-	assert.Equal(t, scan(t, 2, ms...), fromZstd)
+	assert.InDelta(t, float64(len(gzLayer)), float64(st.Packed), 0.05*float64(len(gzLayer)))
+	zLayer := zstdLayer(t, gzLayer)
+	_, st, err = scanLayer(bytes.NewReader(zLayer), 0, ScanOptions{})
+	require.NoError(t, err)
+	assert.InDelta(t, float64(len(zLayer)), float64(st.Packed), 0.05*float64(len(zLayer)))
 }
 
 func TestScanLayerErrors(t *testing.T) {
-	_, err := scanLayer(strings.NewReader("not gzip"), 0)
+	_, _, err := scanLayer(strings.NewReader("not gzip"), 0, ScanOptions{})
 	assert.ErrorContains(t, err, "gzip")
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	_, _ = gz.Write([]byte("not a tar archive, but long enough to need a header block....................................................................................................................................................................................................................................................................................................................................................................................................................................................................."))
 	require.NoError(t, gz.Close())
-	_, err = scanLayer(&buf, 0)
+	_, _, err = scanLayer(&buf, 0, ScanOptions{})
 	assert.ErrorContains(t, err, "tar")
+	_, _, err = scanLayer(bytes.NewReader(layerBytes(t, member{name: "a", body: "x"})), 0, ScanOptions{Codec: "lz4"})
+	assert.ErrorContains(t, err, "unknown codec")
+	_, _, err = scanLayer(bytes.NewReader(layerBytes(t, member{name: "a", body: "x"})), 0, ScanOptions{Codec: Gzip, Level: 42})
+	assert.Error(t, err)
 }
 
 func TestEntriesRoundTrip(t *testing.T) {
-	es := scan(t, 1, member{name: "a b/c", body: "x"}, member{name: "s", link: "a b/c", kind: 'l'})
+	es, st, err := scanLayer(bytes.NewReader(layerBytes(t, member{name: "a b/c", body: "x"}, member{name: "s", link: "a b/c", kind: 'l'})), 1, ScanOptions{Codec: Zstd, Level: 12})
+	require.NoError(t, err)
 	var buf bytes.Buffer
-	require.NoError(t, writeEntries(&buf, es))
-	back, err := readEntries(&buf)
+	require.NoError(t, writeEntries(&buf, es, []LayerStat{st}))
+	back, stats, err := readEntries(&buf)
 	require.NoError(t, err)
 	assert.Equal(t, es, back)
-	_, err = readEntries(strings.NewReader("garbage\n"))
+	assert.Equal(t, []LayerStat{st}, stats)
+	_, _, err = readEntries(strings.NewReader("0\tf\t1\t1\th\tp\t\n"))
+	assert.ErrorContains(t, err, "older imgscan")
+	_, _, err = readEntries(strings.NewReader(entriesHeader + "\ngarbage\n"))
 	assert.Error(t, err)
-	_, err = readEntries(strings.NewReader("x\tf\t1\t1\th\tp\t\n"))
+	_, _, err = readEntries(strings.NewReader(entriesHeader + "\nx\tf\t1\t1\th\tp\t\n"))
 	assert.Error(t, err)
+	_, _, err = readEntries(strings.NewReader(entriesHeader + "\n#layer\tx\n"))
+	assert.ErrorContains(t, err, "bad layer line")
 }
 
 func TestFinalView(t *testing.T) {
@@ -285,12 +359,20 @@ func TestCLIEndToEnd(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, out, "org/img:dev linux/amd64: 2 layers")
 	assert.Contains(t, out, "layer 0 ADD file:abc in /")
+	assert.Contains(t, out, "Layers: the tar stream compressed again vs the registry blob")
+	assert.Contains(t, out, "(gzip level 0)")
 	_, err = os.Stat(cache)
 	require.NoError(t, err)
 
 	again, err := runCLI(t, "org/img:dev", "--registry", srv.URL, "--entries", cache)
 	require.NoError(t, err)
 	assert.Contains(t, again, "across layers (a symlink fixes it)")
+	_, err = runCLI(t, "org/img:dev", "--registry", srv.URL, "--entries", cache, "--codec", "zstd", "--level", "12")
+	assert.ErrorContains(t, err, "pass the same --codec and --level")
+
+	zout, err := runCLI(t, "org/img:dev", "--registry", srv.URL, "--codec", "zstd", "--level", "12")
+	require.NoError(t, err)
+	assert.Contains(t, zout, "(zstd level 12)")
 }
 
 func TestCLIErrors(t *testing.T) {
@@ -307,6 +389,8 @@ func TestCLIErrors(t *testing.T) {
 	assert.Error(t, err)
 	_, err = runCLI(t, "org/img:dev", "--registry", srv.URL, "--entries", "/does/not/exist/dir/e.tsv")
 	assert.Error(t, err)
+	_, err = runCLI(t, "org/img:dev", "--registry", srv.URL, "--codec", "lz4")
+	assert.ErrorContains(t, err, "want zstd or gzip")
 	_, err = runCLI(t, "org/img:dev", "--registry", "http://127.0.0.1:1")
 	assert.Error(t, err)
 	_, err = runCLI(t)
@@ -319,8 +403,8 @@ func TestScanAllReportsBadBlob(t *testing.T) {
 	}))
 	defer srv.Close()
 	reg := &Registry{Base: srv.URL, Repo: "o/i", HTTP: srv.Client()}
-	_, err := scanAll(reg, manifest{Layers: []descriptor{{Digest: "sha256:a"}}}, 0, &bytes.Buffer{})
+	_, _, err := scanAll(reg, manifest{Layers: []descriptor{{Digest: "sha256:a"}}}, 0, ScanOptions{}, &bytes.Buffer{})
 	assert.ErrorContains(t, err, "gzip")
-	_, err = scanAll(&Registry{Base: "http://127.0.0.1:1", Repo: "o/i", HTTP: srv.Client()}, manifest{Layers: []descriptor{{Digest: "sha256:a"}}}, 1, &bytes.Buffer{})
+	_, _, err = scanAll(&Registry{Base: "http://127.0.0.1:1", Repo: "o/i", HTTP: srv.Client()}, manifest{Layers: []descriptor{{Digest: "sha256:a"}}}, 1, ScanOptions{}, &bytes.Buffer{})
 	assert.Error(t, err)
 }
