@@ -67,7 +67,7 @@ func mb(n int64) int64 { return n >> 20 }
 type DupGroup struct {
 	Hash   string
 	Size   int64
-	Packed     int64
+	Packed int64
 	Paths  []string
 	Layers []int
 }
