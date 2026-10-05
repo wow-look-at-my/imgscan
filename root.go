@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"net/http"
 	"os"
 	"strings"
 
@@ -27,9 +26,6 @@ func newRootCmd() *cobra.Command {
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			repo, ref := splitRef(args[0])
-			if tokenURL == "" {
-				tokenURL = fmt.Sprintf("%s/token?scope=repository:%s:pull", registry, repo)
-			}
 			o := Options{Top: top}
 			var err error
 			if o.Rules, err = rulesFrom(rulesFile); err != nil {
@@ -38,13 +34,7 @@ func newRootCmd() *cobra.Command {
 			if o.Drop, err = rulesFrom(dropFile); err != nil {
 				return err
 			}
-			client := &http.Client{}
-			tok, err := anonToken(client, tokenURL)
-			if err != nil {
-				return err
-			}
-			reg := &Registry{Base: registry, Repo: repo, Token: tok, HTTP: client}
-			m, labels, err := reg.Image(ref, arch)
+			reg, m, labels, err := openImage(registry, tokenURL, repo, ref, arch)
 			if err != nil {
 				return err
 			}
