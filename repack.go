@@ -21,7 +21,8 @@ func init() { rootCmd.AddCommand(newRepackCmd()) }
 func newRepackCmd() *cobra.Command {
 	var (
 		registry, tokenURL, arch, codec, tmp string
-		level                                int
+		level, window                        int
+		theoretical                          bool
 	)
 	cmd := &cobra.Command{
 		Use:   "repack REPO[:TAG|@DIGEST]",
@@ -34,7 +35,13 @@ func newRepackCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			repo, ref := splitRef(args[0])
 			o := ScanOptions{Codec: Codec(codec), Level: level}
-			if codec != "" && o.Codec != Zstd && o.Codec != Gzip {
+			if theoretical {
+				o.Codec, o.Window = Zstd, window
+				if o.Level == 0 {
+					o.Level = 19
+				}
+			}
+			if o.Codec != "" && o.Codec != Zstd && o.Codec != Gzip {
 				return fmt.Errorf("--codec %q: want zstd or gzip", codec)
 			}
 			reg, m, labels, err := openImage(registry, tokenURL, repo, ref, arch)
@@ -43,7 +50,12 @@ func newRepackCmd() *cobra.Command {
 			}
 			out := cmd.OutOrStdout()
 			fmt.Fprintf(out, "# %s:%s linux/%s: each layer's members written again and compressed as one stream\n", repo, ref, arch)
-			fmt.Fprintf(out, "%8s %8s %8s %8s  %s\n", "blob MB", "path MB", "typed MB", "+links", "layer")
+			if theoretical {
+				fmt.Fprintf(out, "# typed order, identical files as hardlinks, zstd level %d, %d MB window\n", o.Level, o.Window>>20)
+				fmt.Fprintf(out, "%8s %8s %7s  %s\n", "blob MB", "best MB", "diff", "layer")
+			} else {
+				fmt.Fprintf(out, "%8s %8s %8s %8s  %s\n", "blob MB", "path MB", "typed MB", "+links", "layer")
+			}
 			var blob int64
 			var total RepackStat
 			for i, d := range m.Layers {
@@ -51,14 +63,22 @@ func newRepackCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				s, err := repackLayer(body, i, o, tmp)
+				s, err := repackLayer(body, i, o, tmp, theoretical)
 				body.Close()
 				if err != nil {
 					return err
 				}
 				blob += d.Size
 				total.add(s)
-				fmt.Fprintf(out, "%8d %8d %8d %8d  %s\n", mb(d.Size), mb(s.Path), mb(s.Typed), mb(s.Linked), label(labels, i))
+				if theoretical {
+					fmt.Fprintf(out, "%8d %8d %7s  %s\n", mb(d.Size), mb(s.Linked), pct(s.Linked, d.Size), label(labels, i))
+				} else {
+					fmt.Fprintf(out, "%8d %8d %8d %8d  %s\n", mb(d.Size), mb(s.Path), mb(s.Typed), mb(s.Linked), label(labels, i))
+				}
+			}
+			if theoretical {
+				fmt.Fprintf(out, "%8d %8d %7s  TOTAL\n", mb(blob), mb(total.Linked), pct(total.Linked, blob))
+				return nil
 			}
 			fmt.Fprintf(out, "%8d %8d %8d %8d  TOTAL\n", mb(blob), mb(total.Path), mb(total.Typed), mb(total.Linked))
 			fmt.Fprintf(out, "# typed vs path: %s; typed with links vs path: %s\n", pct(total.Typed, total.Path), pct(total.Linked, total.Path))
@@ -72,6 +92,8 @@ func newRepackCmd() *cobra.Command {
 	f.StringVar(&codec, "codec", "", "codec for the rewritten streams: zstd or gzip (default: the blob's own codec)")
 	f.IntVar(&level, "level", 0, "compression level for --codec (default: the codec's default)")
 	f.StringVar(&tmp, "tmp", "", "directory for the per-layer body file (default: the system temp directory)")
+	f.BoolVar(&theoretical, "theoretical", false, "compress only the best order (typed, identical files as hardlinks) with zstd and a large window")
+	f.IntVar(&window, "window", 512<<20, "zstd window in bytes for --theoretical; a power of two, at most 512 MB")
 	return cmd
 }
 
@@ -92,7 +114,8 @@ type repackMember struct {
 }
 
 // repackLayer reads one layer, keeps its file bodies in a temporary file, and compresses the members in orders.
-func repackLayer(r io.Reader, layer int, o ScanOptions, tmp string) (RepackStat, error) {
+// theoretical compresses only the typed order with links.
+func repackLayer(r io.Reader, layer int, o ScanOptions, tmp string, theoretical bool) (RepackStat, error) {
 	plain, codec, err := decompress(r, layer)
 	if err != nil {
 		return RepackStat{}, err
@@ -110,6 +133,13 @@ func repackLayer(r io.Reader, layer int, o ScanOptions, tmp string) (RepackStat,
 	if err != nil {
 		return RepackStat{}, err
 	}
+	if theoretical {
+		n, err := compressMembers(typedOrder(ms), f, codec, o, true)
+		if err != nil {
+			return RepackStat{}, fmt.Errorf("layer %d: %w", layer, err)
+		}
+		return RepackStat{Linked: n}, nil
+	}
 	orders := [][]repackMember{ms, typedOrder(ms), typedOrder(ms)}
 	sizes := make([]int64, len(orders))
 	errs := make([]error, len(orders))
@@ -118,7 +148,7 @@ func repackLayer(r io.Reader, layer int, o ScanOptions, tmp string) (RepackStat,
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			sizes[i], errs[i] = compressMembers(orders[i], f, codec, o.Level, i == 2)
+			sizes[i], errs[i] = compressMembers(orders[i], f, codec, o, i == 2)
 		}(i)
 	}
 	wg.Wait()
@@ -217,8 +247,8 @@ func contentKey(m repackMember) string {
 
 // compressMembers writes ms as a tar stream into codec and returns the compressed size.
 // With links, a later file identical to an earlier one becomes a hardlink to it.
-func compressMembers(ms []repackMember, bodies io.ReaderAt, codec Codec, level int, links bool) (int64, error) {
-	m, err := newMeter(codec, level)
+func compressMembers(ms []repackMember, bodies io.ReaderAt, codec Codec, o ScanOptions, links bool) (int64, error) {
+	m, err := newMeter(codec, o.Level, o.Window)
 	if err != nil {
 		return 0, err
 	}

@@ -27,10 +27,15 @@ func TestRepackGroupingBeatsPathOrder(t *testing.T) {
 		member{name: "lib/c.so", body: elfLike(5)},
 		member{name: "lib/copy.so", body: elfLike(5)},
 	)
-	s, err := repackLayer(bytes.NewReader(gzLayer), 0, ScanOptions{}, t.TempDir())
+	s, err := repackLayer(bytes.NewReader(gzLayer), 0, ScanOptions{}, t.TempDir(), false)
 	require.NoError(t, err)
 	assert.Less(t, s.Typed, s.Path, "grouping by type puts similar bodies inside the window")
 	assert.Less(t, s.Linked, s.Typed, "a hardlink replaces the identical body")
+
+	best, err := repackLayer(bytes.NewReader(gzLayer), 0, ScanOptions{Codec: Zstd, Level: 19, Window: 512 << 20}, t.TempDir(), true)
+	require.NoError(t, err)
+	assert.Equal(t, RepackStat{Linked: best.Linked}, best, "theoretical measures only the best order")
+	assert.Less(t, best.Linked, s.Linked, "zstd with a large window beats gzip on the same order")
 }
 
 // The rewritten tar must extract to the same files: every hardlink after the file it names, every body kept.
@@ -93,6 +98,16 @@ func TestRepackCLI(t *testing.T) {
 	require.NoError(t, cmd.Execute())
 	assert.Contains(t, out.String(), "layer 0 ADD file:abc in /")
 	assert.Contains(t, out.String(), "typed vs path:")
+
+	cmd = newRootCmd()
+	cmd.AddCommand(newRepackCmd())
+	out.Reset()
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"repack", "org/img:dev", "--registry", srv.URL, "--theoretical", "--window", "1048576"})
+	require.NoError(t, cmd.Execute())
+	assert.Contains(t, out.String(), "zstd level 19, 1 MB window")
+	assert.Contains(t, out.String(), "best MB")
 
 	cmd = newRootCmd()
 	cmd.AddCommand(newRepackCmd())
