@@ -266,7 +266,8 @@ func writeMembers(w io.Writer, ms []repackMember, bodies io.ReaderAt, links bool
 		body := h.Typeflag == tar.TypeReg && h.Size > 0
 		if body && links {
 			if name, ok := firstOf[mem.hash]; ok {
-				h.Typeflag, h.Linkname, h.Size = tar.TypeLink, name, 0
+				// The source format may not fit the new link name, so the writer picks one.
+				h.Typeflag, h.Linkname, h.Size, h.Format = tar.TypeLink, name, 0, tar.FormatUnknown
 				body = false
 			} else {
 				firstOf[mem.hash] = h.Name
